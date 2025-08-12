@@ -12,18 +12,18 @@ type Manager struct {
 	Branch       string
 }
 
-type OperationStatus string
+type CheckpointStatus string
 
 const (
-	OperationStatusPending   OperationStatus = "pending"
-	OperationStatusCompleted OperationStatus = "completed"
+	CheckpointStatusPending   CheckpointStatus = "pending"
+	CheckpointStatusCompleted CheckpointStatus = "completed"
 )
 
-type Operation struct {
+type Checkpoint struct {
 	manager *Manager
 	id      string
 	name    string
-	status  OperationStatus
+	status  CheckpointStatus
 }
 
 type AppendFunc func(events ...*session.Event)
@@ -34,7 +34,7 @@ func (m *Manager) checkpoint() error {
 	panic("not implemented")
 }
 
-func (m *Manager) load(name string) (*Operation, iter.Seq2[*session.Event, error]) {
+func (m *Manager) load(name string) (*Checkpoint, iter.Seq2[*session.Event, error]) {
 	panic("not implemented")
 }
 
@@ -54,25 +54,21 @@ func (m *Manager) Run(op string, fn func(append AppendFunc) error) (iter.Seq2[*s
 	}
 
 	resumedOp, resumedIt := m.load(op)
-	if resumedOp.status == OperationStatusCompleted {
+	if resumedOp.status == CheckpointStatusCompleted {
 		return resumedIt, status
 	}
+	panic("not implemented")
 
-	var events []*session.Event
-	appendFn := func(e ...*session.Event) {
-		for _, event := range e {
-			events = append(events, event)
-		}
-	}
+	// var yield iter.Seq2[*session.Event, error]
+	// // appender := newAppender(yield)
 
-	if err := fn(appendFn); err != nil {
-		status.err = err
-		return nil, status
-	}
-	if err := m.checkpoint(); err != nil {
-		status.err = err
-	}
-
+	// if err := fn(appender.appendFunc); err != nil {
+	// 	status.err = err
+	// 	return nil, status
+	// }
+	// if err := m.checkpoint(); err != nil {
+	// 	status.err = err
+	// }
 	// TODO: Return the yielder
 	return nil, status
 }

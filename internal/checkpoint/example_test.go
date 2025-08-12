@@ -12,12 +12,12 @@ func Example() {
 		InvocationID: "invocation-123",
 		Branch:       "branch",
 	}
-	// Run runs the "preprocess" operation if it's not already completed.
+	// Run runs the "preprocess" checkpoint if it's not already completed.
 	// If completed, it hydrates the operation from the checkpointed events.
 	// After manager.Run is completed, a checkpoint is automatically created.
 	// Returned events are used to read the newly created or hydrated events.
 	it, status := manager.Run("preprocess", func(append checkpoint.AppendFunc) error {
-		// Append one of more events to the operation.
+		// Append one of more events to the checkpoint.
 		append(&session.Event{}) // TODO: Append events as they are produced.
 		return nil
 	})
