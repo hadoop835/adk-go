@@ -32,7 +32,7 @@ type GRootRunner struct {
 	cfg *GRootRunnerConfig
 
 	parents parentmap.Map
-	client  *internal.Client
+	session *internal.Session
 }
 
 func NewGRootRunner(cfg *GRootRunnerConfig) (*GRootRunner, error) {
@@ -44,16 +44,12 @@ func NewGRootRunner(cfg *GRootRunnerConfig) (*GRootRunner, error) {
 	if err != nil {
 		return nil, err
 	}
-	for frame, err := range sess.ExecuteActions(nil, nil) {
-		log.Println(frame, err)
-	}
-
 	if cfg.SessionService == nil {
 		cfg.SessionService = sessionservice.Mem()
 	}
 	return &GRootRunner{
-		cfg:    cfg,
-		client: client,
+		cfg:     cfg,
+		session: sess,
 	}, nil
 }
 
@@ -108,9 +104,7 @@ func (r *GRootRunner) Run(ctx context.Context, userID, sessionID string, msg *ge
 
 			// only commit non-partial event to a session service
 			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
-
 				// TODO: update session state & delta
-
 				if err := r.cfg.SessionService.AppendEvent(ctx, session, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
