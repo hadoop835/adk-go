@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -14,10 +15,18 @@ import (
 	"google.golang.org/genai"
 )
 
-const endpoint = "wss://dev-grootafe-pa-googleapis.sandbox.google.com/ws/cloud.ai.groot.afe.GRootAfeService/ExecuteActions"
+var (
+	logfile       string
+	resume        bool
+	grootEndpoint string
+)
 
 func main() {
 	ctx := context.Background()
+	flag.StringVar(&logfile, "logfile", "", "")
+	flag.BoolVar(&resume, "resume", false, "")
+	flag.StringVar(&grootEndpoint, "endpoint", "wss://dev-grootafe-pa-googleapis.sandbox.google.com/ws/cloud.ai.groot.afe.GRootAfeService/ExecuteActions", "")
+	flag.Parse()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GEMINI_API_KEY"),
@@ -25,6 +34,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
+
+	// emojiAgent, err := llmagent.New(llmagent.Config{
+	// 	Name:        "emoji_agent",
+	// 	Model:       model,
+	// 	Description: "An agent that can add more emojis to responses.",
+	// 	Instruction: "Answer every answer with a ton of emojis, make it excessive.",
+	// })
+	// if err != nil {
+	// 	log.Fatalf("Failed to create agent: %v", err)
+	// }
 
 	agent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
@@ -34,16 +53,19 @@ func main() {
 		Tools: []tool.Tool{
 			tool.NewGoogleSearchTool(model),
 		},
+		// SubAgents: []agent.Agent{emojiAgent},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	r, err := runner.NewGRootRunner(&runner.GRootRunnerConfig{
-		GRootEndpoint: endpoint,
-		GRootAPIKey:   os.Getenv("GROOT_KEY"),
-		AppName:       "hello_world",
-		RootAgent:     agent,
+		GRootEndpoint:  grootEndpoint,
+		GRootAPIKey:    os.Getenv("GROOT_KEY"),
+		EventLog:       logfile,
+		ResumeEventLog: resume,
+		AppName:        "hello_world",
+		RootAgent:      agent,
 	})
 	if err != nil {
 		log.Fatal(err)

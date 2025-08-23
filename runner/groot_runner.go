@@ -1,10 +1,13 @@
 package runner
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -20,9 +23,11 @@ import (
 )
 
 type GRootRunnerConfig struct {
-	GRootEndpoint  string
-	GRootAPIKey    string
-	GRootSessionID string
+	GRootEndpoint string
+	GRootAPIKey   string
+
+	EventLog       string
+	ResumeEventLog bool
 
 	AppName        string
 	RootAgent      agent.Agent
@@ -32,29 +37,40 @@ type GRootRunnerConfig struct {
 type GRootRunner struct {
 	cfg *GRootRunnerConfig
 
-	parents parentmap.Map
-	session *internal.Session
+	parents  parentmap.Map
+	registry *internal.Registry
+	eventLog *EventLog
 }
 
 func NewGRootRunner(cfg *GRootRunnerConfig) (*GRootRunner, error) {
+	if cfg.SessionService == nil {
+		cfg.SessionService = sessionservice.Mem()
+	}
+	if cfg.EventLog == "" {
+		cfg.EventLog = "adk_runner.log"
+	}
 	client, err := internal.NewClient(cfg.GRootEndpoint, cfg.GRootAPIKey)
 	if err != nil {
 		return nil, err
 	}
-
-	if cfg.GRootSessionID == "" {
-		cfg.GRootSessionID = uuid.NewString()
-	}
-	if cfg.SessionService == nil {
-		cfg.SessionService = sessionservice.Mem()
-	}
-	sess, err := client.OpenSession(cfg.GRootSessionID)
-	if err != nil {
-		return nil, err
+	var eventLog *EventLog
+	if cfg.ResumeEventLog {
+		var events []*session.Event
+		eventLog, events, err = ResumerEventLog(cfg.EventLog, client)
+		if err != nil {
+			return nil, err
+		}
+		_ = events // TODO(jbd): Inject events into the session
+	} else {
+		eventLog, err = NewEventLog(cfg.EventLog, client)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &GRootRunner{
-		cfg:     cfg,
-		session: sess,
+		cfg:      cfg,
+		eventLog: eventLog,
+		registry: internal.NewRegistry(cfg.RootAgent),
 	}, nil
 }
 
@@ -84,6 +100,10 @@ func (r *GRootRunner) Run(ctx context.Context, userID, sessionID string, msg *ge
 			}
 		}
 
+		input := uuid.NewString()
+		output := uuid.NewString()
+		branch := input + ":" + output
+
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
@@ -92,44 +112,27 @@ func (r *GRootRunner) Run(ctx context.Context, userID, sessionID string, msg *ge
 		ctx := agent.NewContext(ctx, agentToRun, msg, &mutableSession{
 			service:       r.cfg.SessionService,
 			storedSession: session,
-		}, "")
+		}, branch)
 
 		if err := r.appendMessageToSession(ctx, session, msg); err != nil {
 			yield(nil, err)
 			return
 		}
 
-		input := uuid.NewString()
-		output := uuid.NewString()
-		shadow, status, err := r.session.NewADKShadow(agentToRun.Name(), input, output)
-		if err != nil {
-			if !yield(nil, err) {
-				return
-			}
+		if err := r.eventLog.LogActivity("agent_start", r.registry.AgentFullname(agentToRun), input, output); err != nil {
+			log.Printf("Failed to log agent: %v", err)
 		}
-		if status == internal.ShadowStatusCompleted {
-			// TODO: Retrieve the previous.
-		}
-
 		for event, err := range agentToRun.Run(ctx) {
 			if err != nil {
-				if event.LLMResponse != nil {
-					if !yield(event, err) {
-						return
-					}
+				if !yield(event, err) {
+					return
 				}
 				continue
 			}
 
-			// TODO: Write the entire event.
-			for _, part := range event.LLMResponse.Content.Parts {
-				if err := shadow.WriteFrame(output, internal.ChunkFromPart(part), event.LLMResponse.Partial); err != nil {
-					if !yield(nil, err) {
-						return
-					}
-				}
+			if err := r.eventLog.LogEvent(output, event); err != nil {
+				log.Printf("Failed to log event: %v", err)
 			}
-
 			// only commit non-partial event to a session service
 			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
 				// TODO: update session state & delta
@@ -225,4 +228,113 @@ func (r *GRootRunner) appendMessageToSession(ctx agent.Context, storedSession se
 		return fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return nil
+}
+
+type EventLog struct {
+	logFile *os.File
+	session *internal.Session
+	shadows map[string]*internal.Shadow // by output ID
+}
+
+func NewEventLog(filename string, client *internal.Client) (*EventLog, error) {
+	sess, err := client.OpenSession(uuid.NewString())
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &EventLog{
+		logFile: file,
+		session: sess,
+		shadows: make(map[string]*internal.Shadow),
+	}, nil
+}
+
+func (e *EventLog) LogEvent(id string, event *session.Event) error {
+	if event.LLMResponse == nil || event.LLMResponse.Content == nil {
+		return nil
+	}
+	shadow, ok := e.shadows[id]
+	if !ok {
+		return fmt.Errorf("no shadow found for output ID: %s", id)
+	}
+
+	fmt.Fprintf(e.logFile, "%s|stream|%s\n", e.session.ID(), id)
+	e.logFile.Sync()
+
+	out, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return shadow.WriteFrame(id, &internal.Chunk{
+		MIMEType: "application/json",
+		Data:     out,
+	}, event.Partial)
+}
+
+func (e *EventLog) LogActivity(kind string, name, input, output string) error {
+	shadow, err := e.session.NewADKShadow(name, input, output)
+	if err != nil {
+		return err
+	}
+	e.shadows[output] = shadow
+	_, err = fmt.Fprintf(e.logFile, "%s|%s|%s|%s|%s\n", e.session.ID(), kind, name, input, output)
+	e.logFile.Sync()
+	return err
+}
+
+func ResumerEventLog(filename string, client *internal.Client) (*EventLog, []*session.Event, error) {
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, nil, err
+	}
+	scanner := bufio.NewScanner(file)
+	var sessionID string
+	var eventIDs []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Split(line, "|")
+		switch parts[1] {
+		case "agent_start":
+		case "stream":
+			sessionID = parts[0]
+			eventIDs = append(eventIDs, parts[2])
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+	sess, err := client.OpenSession(sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Hydrate all events...
+	var events []*session.Event
+	for _, id := range eventIDs {
+		chunks, err := sess.ReadAll(id)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, chunk := range chunks {
+			if chunk == nil || chunk.Data == nil {
+				continue
+			}
+			if chunk.MIMEType != "application/json" {
+				return nil, nil, fmt.Errorf("expected application/json, got %s", chunk.MIMEType)
+			}
+			var event session.Event
+			if err := json.Unmarshal(chunk.Data, &event); err != nil {
+				return nil, nil, err
+			}
+			events = append(events, &event)
+		}
+	}
+	return &EventLog{
+		logFile: file,
+		session: sess,
+		shadows: make(map[string]*internal.Shadow),
+	}, events, nil
 }

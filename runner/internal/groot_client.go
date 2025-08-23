@@ -45,14 +45,6 @@ type executeActionsMsg struct {
 	StreamFrames []*StreamFrame `json:"streamFrames,omitempty"`
 }
 
-type ShadowStatus string
-
-const (
-	ShadowStatusUnknown   = "unknown"
-	ShadowStatusPending   = "pending"
-	ShadowStatusCompleted = "completed"
-)
-
 type Shadow struct {
 	sess         *Session
 	displayName  string
@@ -100,10 +92,14 @@ func (c *Client) OpenSession(sessionID string) (*Session, error) {
 	return &Session{c: c, sessionID: sessionID}, nil
 }
 
-func (s *Session) NewADKShadow(name string, input string, output string) (*Shadow, ShadowStatus, error) {
+func (s *Session) ID() string {
+	return s.sessionID
+}
+
+func (s *Session) NewADKShadow(name string, input string, output string) (*Shadow, error) {
 	waitID, err := s.writeShadowAction(name, input, output)
 	if err != nil {
-		return nil, ShadowStatusUnknown, err
+		return nil, err
 	}
 	return &Shadow{
 		sess:         s,
@@ -111,7 +107,37 @@ func (s *Session) NewADKShadow(name string, input string, output string) (*Shado
 		input:        input,
 		output:       output,
 		waitStreamID: waitID,
-	}, ShadowStatusPending, nil
+	}, nil
+}
+
+func (s *Session) ReadAll(id string) ([]*Chunk, error) {
+	var chunks []*Chunk
+	if err := s.c.conn.WriteJSON(&executeActionsMsg{
+		SessionID: s.sessionID,
+		ActionGraph: &ActionGraph{
+			Actions: []*Action{
+				{
+					Name:    "restore_stream",
+					Outputs: []*Port{{Name: "output", StreamID: id}},
+				},
+			},
+			Outputs: []*Port{{Name: "output", StreamID: id}},
+		},
+	}); err != nil {
+		return nil, err
+	}
+	for {
+		var resp executeActionsMsg
+		if err := s.c.conn.ReadJSON(&resp); err != nil {
+			return nil, err
+		}
+		for _, frame := range resp.StreamFrames {
+			chunks = append(chunks, frame.Data)
+			if !frame.Continued {
+				return chunks, nil
+			}
+		}
+	}
 }
 
 func (s *Session) writeStreamFrame(sf *StreamFrame) error {
