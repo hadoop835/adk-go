@@ -18,12 +18,13 @@ package web
 import (
 	"flag"
 	"fmt"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/a2aproject/a2a-go/a2agrpc"
 	"github.com/a2aproject/a2a-go/a2asrv"
