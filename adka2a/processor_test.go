@@ -42,11 +42,6 @@ func newFinalStatusUpdate(task *a2a.Task, state a2a.TaskState, msg *a2a.Message)
 	return ev
 }
 
-func withMetadata(event *a2a.TaskStatusUpdateEvent, meta map[string]any) *a2a.TaskStatusUpdateEvent {
-	event.Metadata = meta
-	return event
-}
-
 func TestEventProcessor_Process(t *testing.T) {
 	artifactIDPlaceholder := a2a.NewArtifactID()
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
@@ -125,10 +120,8 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: &llm.Response{ErrorCode: 1, ErrorMessage: "failed"}},
 			},
 			terminal: []a2a.Event{
-				withMetadata(
-					newFinalStatusUpdate(
-						task, a2a.TaskStateFailed, a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: `llm error response: "failed"`}),
-					),
+				toTaskFailedUpdateEvent(
+					task, errorFromResponse(&llm.Response{ErrorCode: 1, ErrorMessage: "failed"}),
 					map[string]any{toMetaKey("error_code"): 1},
 				),
 			},
@@ -140,11 +133,8 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: &llm.Response{ErrorCode: 2, ErrorMessage: "failed 2"}},
 			},
 			terminal: []a2a.Event{
-				withMetadata(
-					newFinalStatusUpdate(
-						task, a2a.TaskStateFailed,
-						a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: `llm error response: "failed 1"`}),
-					),
+				toTaskFailedUpdateEvent(
+					task, errorFromResponse(&llm.Response{ErrorCode: 1, ErrorMessage: "failed 1"}),
 					map[string]any{toMetaKey("error_code"): 1},
 				),
 			},
@@ -162,10 +152,8 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 			terminal: []a2a.Event{
 				newArtifactLastChunkEvent(task),
-				withMetadata(
-					newFinalStatusUpdate(
-						task, a2a.TaskStateFailed, a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: `llm error response: "failed"`}),
-					),
+				toTaskFailedUpdateEvent(
+					task, errorFromResponse(&llm.Response{ErrorCode: 1, ErrorMessage: "failed"}),
 					map[string]any{toMetaKey("error_code"): 1},
 				),
 			},
@@ -183,11 +171,8 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 			terminal: []a2a.Event{
 				newArtifactLastChunkEvent(task),
-				withMetadata(
-					newFinalStatusUpdate(
-						task, a2a.TaskStateFailed,
-						a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: `llm error response: "failed"`}),
-					),
+				toTaskFailedUpdateEvent(
+					task, errorFromResponse(&llm.Response{ErrorCode: 1, ErrorMessage: "failed"}),
 					map[string]any{toMetaKey("error_code"): 1},
 				),
 			},

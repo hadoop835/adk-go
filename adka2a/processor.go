@@ -22,6 +22,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -64,11 +65,9 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 
 	resp := event.LLMResponse
 	if resp.ErrorCode != 0 {
-		err := fmt.Errorf("llm error response: %q", resp.ErrorMessage)
-
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if _, ok := p.terminalEvents[a2a.TaskStateFailed]; !ok {
-			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.task, err, eventMeta)
+			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.task, errorFromResponse(resp), eventMeta)
 		}
 	}
 
@@ -125,10 +124,13 @@ func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
 }
 
 func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) *a2a.TaskStatusUpdateEvent {
-	meta, err := toEventMeta(p.meta, event)
-	if err != nil {
-		// TODO(yarolegovich): log ignored error
-		meta = p.meta.eventMeta
+	meta := p.meta.eventMeta
+	if event != nil {
+		if eventMeta, err := toEventMeta(p.meta, event); err != nil {
+			// TODO(yarolegovich): log ignored error
+		} else {
+			meta = eventMeta
+		}
 	}
 	return toTaskFailedUpdateEvent(p.task, cause, meta)
 }
@@ -148,4 +150,8 @@ func isInputRequired(event *session.Event, parts []*genai.Part) bool {
 		}
 	}
 	return false
+}
+
+func errorFromResponse(resp *llm.Response) error {
+	return fmt.Errorf("llm error response: %q", resp.ErrorMessage)
 }

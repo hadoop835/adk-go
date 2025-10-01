@@ -94,7 +94,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, qu
 	task := reqCtx.Task
 	if task == nil {
 		task = &a2a.Task{ID: reqCtx.TaskID, ContextID: reqCtx.ContextID}
-		event := a2a.NewStatusUpdateEvent(task, a2a.TaskStateSubmitted, nil)
+		event := a2a.NewStatusUpdateEvent(task, a2a.TaskStateSubmitted, msg)
 		if err := queue.Write(ctx, event); err != nil {
 			return fmt.Errorf("failed to setup a task: %w", err)
 		}
@@ -103,8 +103,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, qu
 	invocationMeta := toInvocationMeta(e.config, reqCtx)
 
 	if err := e.prepareSession(ctx, invocationMeta); err != nil {
-		meta := invocationMeta.eventMeta
-		event := toTaskFailedUpdateEvent(task, fmt.Errorf("failed to prepare a session: %w", err), meta)
+		event := toTaskFailedUpdateEvent(task, err, invocationMeta.eventMeta)
 		if err := queue.Write(ctx, event); err != nil {
 			return err
 		}

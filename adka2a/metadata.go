@@ -46,7 +46,6 @@ func toMetaKey(key string) string {
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
 	result := make(map[string]any, len(meta.eventMeta)+5)
-
 	for k, v := range meta.eventMeta {
 		result[k] = v
 	}
