@@ -79,7 +79,7 @@ func (a *a2aLauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) 
 	return handler
 }
 
-// SimpleDescription implements web.WebSublauncher. For A2A no subrouter definition is needed
+// SetupSubrouters implements the web.WebSublauncher interface. It adds A2A paths to the main router.
 func (a *a2aLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error {
 	publicURL, err := url.JoinPath(a.config.agentURL, apiPath)
 	if err != nil {
