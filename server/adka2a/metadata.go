@@ -88,7 +88,7 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 }
 
 func setActionsMeta(meta map[string]any, actions session.EventActions) map[string]any {
-	if actions.TransferToAgent == "" && !actions.Escalate {
+	if actions.TransferToAgent == "" && !actions.Escalate { // if meta was nil, it should remain nil
 		return meta
 	}
 	if meta == nil {

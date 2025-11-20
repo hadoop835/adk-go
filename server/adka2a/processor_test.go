@@ -260,6 +260,22 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 		},
 		{
+			name: "last agent transfer is returned",
+			events: []*session.Event{
+				{ID: "125", InvocationID: "345", Actions: session.EventActions{TransferToAgent: "a-2"}},
+				{ID: "126", InvocationID: "346", Actions: session.EventActions{TransferToAgent: "a-3"}},
+			},
+			terminal: []a2a.Event{
+				&a2a.TaskStatusUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
+					Metadata:  map[string]any{metadataTransferToAgentKey: "a-3"},
+					Final:     true,
+				},
+			},
+		},
+		{
 			name: "actions not overwritten by subsequent events",
 			events: []*session.Event{
 				{

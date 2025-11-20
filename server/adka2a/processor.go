@@ -141,7 +141,7 @@ func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) 
 
 func (p *eventProcessor) updateTerminalActions(event *session.Event) {
 	p.terminalActions.Escalate = p.terminalActions.Escalate || event.Actions.Escalate
-	if p.terminalActions.TransferToAgent == "" {
+	if event.Actions.TransferToAgent != "" {
 		p.terminalActions.TransferToAgent = event.Actions.TransferToAgent
 	}
 }

@@ -276,8 +276,6 @@ func toEventActions(event a2a.Event) session.EventActions {
 	meta := event.Meta()
 	var result session.EventActions
 	result.Escalate, _ = meta[metadataEscalateKey].(bool)
-	if transferToAgent, ok := meta[metadataTransferToAgentKey].(string); ok {
-		result.TransferToAgent = transferToAgent
-	}
+	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)
 	return result
 }
