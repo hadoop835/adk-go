@@ -17,6 +17,7 @@ package adka2a
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -70,7 +71,7 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 	if resp.ErrorCode != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if _, ok := p.terminalEvents[a2a.TaskStateFailed]; !ok {
-			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), eventMeta)
+			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), maps.Clone(eventMeta))
 		}
 	}
 
@@ -122,7 +123,7 @@ func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
 
 	ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateCompleted, nil)
 	ev.Final = true
-	ev.Metadata = setActionsMeta(p.meta.eventMeta, p.terminalActions)
+	ev.Metadata = setActionsMeta(maps.Clone(p.meta.eventMeta), p.terminalActions)
 	result = append(result, ev)
 	return result
 }

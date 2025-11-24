@@ -56,8 +56,7 @@ func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv
 }
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
-	result := make(map[string]any)
-	maps.Copy(result, meta.eventMeta)
+	result := maps.Clone(meta.eventMeta)
 
 	for k, v := range map[string]string{
 		"invocation_id": event.InvocationID,
