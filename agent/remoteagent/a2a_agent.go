@@ -142,7 +142,11 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			event := convertToSessionEvent(ctx, req, a2aEvent, err)
 
 			if resp, err := runAfterA2ARequestCallbacks(ctx, cfg, req, a2aEvent, err, event); resp != nil || err != nil {
-				if !yield(resp, err) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if !yield(resp, nil) {
 					return
 				}
 				continue

@@ -541,6 +541,23 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 			},
 		},
 		{
+			name: "after error stops the run",
+			events: func(rc *a2asrv.RequestContext) []a2a.Event {
+				finalEvent := a2a.NewStatusUpdateEvent(rc, a2a.TaskStateCompleted, nil)
+				finalEvent.Final = true
+				return []a2a.Event{
+					a2a.NewArtifactEvent(rc, a2a.TextPart{Text: "Hello"}),
+					finalEvent,
+				}
+			},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					return nil, fmt.Errorf("rejected")
+				},
+			},
+			wantErr: fmt.Errorf("rejected"),
+		},
+		{
 			name: "request overwrite with response",
 			before: []BeforeA2ARequestCallback{
 				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
