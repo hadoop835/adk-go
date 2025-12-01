@@ -155,7 +155,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			if cfg.Converter != nil {
 				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), a2aEvent, err)
 			} else {
-				event = convertToSessionEvent(ctx, req, a2aEvent, err)
+				event, err = convertToSessionEvent(ctx, req, a2aEvent, err)
 			}
 
 			if resp, err := runAfterA2ARequestCallbacks(ctx, cfg, req, event, err); resp != nil || err != nil {
@@ -184,25 +184,25 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 }
 
 // Converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
-func convertToSessionEvent(ctx agent.InvocationContext, req *a2a.MessageSendParams, a2aEvent a2a.Event, err error) *session.Event {
+func convertToSessionEvent(ctx agent.InvocationContext, req *a2a.MessageSendParams, a2aEvent a2a.Event, err error) (*session.Event, error) {
 	if err != nil {
 		event := toErrorEvent(ctx, err)
 		updateCustomMetadata(event, req, nil)
-		return event
+		return event, nil
 	}
 
 	event, err := adka2a.ToSessionEvent(ctx, a2aEvent)
 	if err != nil {
 		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
 		updateCustomMetadata(event, req, nil)
-		return event
+		return event, nil
 	}
 
 	if event != nil {
 		updateCustomMetadata(event, req, a2aEvent)
 	}
 
-	return event
+	return event, nil
 }
 
 func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCard, error) {
