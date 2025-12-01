@@ -476,9 +476,11 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 	testCases := []struct {
 		name          string
+		sessionEvents []*session.Event
 		events        func(*a2asrv.RequestContext) []a2a.Event
 		before        []BeforeA2ARequestCallback
 		after         []AfterA2ARequestCallback
+		converter     A2AEventConverter
 		wantResponses []model.LLMResponse
 		wantErr       error
 	}{
@@ -494,7 +496,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				},
 			},
 			after: []AfterA2ARequestCallback{
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					result.Content = genai.NewContentFromText(result.Content.Parts[0].Text+"bar", genai.RoleModel)
 					result.CustomMetadata = req.Metadata
 					return nil, nil
@@ -520,7 +522,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				}
 			},
 			after: []AfterA2ARequestCallback{
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					result.CustomMetadata = map[string]any{"foo": "bar"}
 					return nil, nil
 				},
@@ -550,7 +552,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				}
 			},
 			after: []AfterA2ARequestCallback{
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					return nil, fmt.Errorf("rejected")
 				},
 			},
@@ -577,7 +579,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 		{
 			name: "response overwrite",
 			after: []AfterA2ARequestCallback{
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
 				},
 			},
@@ -586,7 +588,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 		{
 			name: "response overwrite with error",
 			after: []AfterA2ARequestCallback{
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					return nil, fmt.Errorf("failed")
 				},
 			},
@@ -608,15 +610,42 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 		{
 			name: "after interceptor short-circuit",
 			after: []AfterA2ARequestCallback{
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					return nil, fmt.Errorf("failed")
 				},
-				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
 					t.Fatalf("not called")
 					return nil, nil
 				},
 			},
 			wantErr: fmt.Errorf("failed"),
+		},
+		{
+			name:          "after interceptor for empty session",
+			sessionEvents: []*session.Event{},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
+					if len(req.Message.Parts) != 0 {
+						t.Fatalf("got %d parts, expected empty message", len(req.Message.Parts))
+					}
+					return nil, fmt.Errorf("empty session")
+				},
+			},
+			wantErr: fmt.Errorf("empty session"),
+		},
+		{
+			name: "converter error",
+			converter: func(ctx agent.ReadonlyContext, event a2a.Event, err error) (*session.Event, error) {
+				return nil, fmt.Errorf("failed")
+			},
+			wantErr: fmt.Errorf("failed"),
+		},
+		{
+			name: "converter custom response",
+			converter: func(ctx agent.ReadonlyContext, event a2a.Event, err error) (*session.Event, error) {
+				return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
+			},
+			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
 		},
 	}
 
@@ -642,12 +671,17 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				AgentCard:              card,
 				BeforeRequestCallbacks: tc.before,
 				AfterRequestCallbacks:  tc.after,
+				Converter:              tc.converter,
 			})
 			if err != nil {
 				t.Fatalf("remoteagent.NewA2A() error = %v", err)
 			}
 
-			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+			sessionEvents := []*session.Event{newUserHello()}
+			if tc.sessionEvents != nil {
+				sessionEvents = tc.sessionEvents
+			}
+			ictx := newInvocationContext(t, sessionEvents)
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
 			if err != nil && tc.wantErr == nil {
 				t.Fatalf("agent.Run() error = %v, want nil", err)
