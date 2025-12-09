@@ -305,3 +305,83 @@ func TestExecutor_SessionReuse(t *testing.T) {
 		t.Fatal("want sessionID to be different for different contextIDs")
 	}
 }
+
+func TestExecutor_AfterEventCallback(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+
+	testCases := []struct {
+		name       string
+		events     []*session.Event
+		afterEvent AfterEventCallback
+		wantEvents []a2a.Event
+	}{
+		{
+			name: "enrich event",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				processed.Artifact.Parts = append(processed.Artifact.Parts, a2a.TextPart{Text: " (enriched)"})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: " (enriched)"}),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}, a2a.TextPart{Text: " (enriched)"}),
+				newArtifactLastChunkEvent(task),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "abort execution",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				return fmt.Errorf("abort execution")
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				toTaskFailedUpdateEvent(task, fmt.Errorf("processor failed: abort execution"), nil),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		ignoreFields := []cmp.Option{
+			cmpopts.IgnoreFields(a2a.Message{}, "ID"),
+			cmpopts.IgnoreFields(a2a.Artifact{}, "ID"),
+			cmpopts.IgnoreFields(a2a.TaskStatus{}, "Timestamp"),
+			cmpopts.IgnoreFields(a2a.TaskStatusUpdateEvent{}, "Metadata"),
+			cmpopts.IgnoreFields(a2a.TaskArtifactUpdateEvent{}, "Metadata"),
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			agent, err := newEventReplayAgent(tc.events, nil)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v, want nil", err)
+			}
+			sessionService := session.InMemoryService()
+			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig:       runnerConfig,
+				AfterEventCallback: tc.afterEvent,
+			})
+			queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+
+			err = executor.Execute(t.Context(), reqCtx, queue)
+			if err != nil {
+				t.Fatalf("executor.Execute() error = %v, want nil", err)
+			}
+			if tc.wantEvents != nil {
+				if diff := cmp.Diff(tc.wantEvents, queue.events, ignoreFields...); diff != "" {
+					t.Fatalf("executor.Execute() wrong events (+got,-want):\ngot = %v\nwant = %v\ndiff = %s", queue.events, tc.wantEvents, diff)
+				}
+			}
+		})
+	}
+}

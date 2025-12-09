@@ -21,19 +21,26 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
 
-// ExecutorConfig represents mandatory Executor dependencies.
+// AfterEventCallback is the callback which will be called after an ADK event is converted to an A2A event.
+type AfterEventCallback func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error
+
+// ExecutorConfig allows to configure Executor b.
 type ExecutorConfig struct {
 	// RunnerConfig is the configuration which will be used for [runner.New] during A2A Execute invocation.
 	RunnerConfig runner.Config
+
 	// RunConfig is the configuration which will be passed to [runner.Runner.Run] during A2A Execute invocation.
 	RunConfig agent.RunConfig
+
+	// AfterEventCallback is the callback which will be called after an ADK event is successfully converted to an A2A event.
+	// This gives an opportunity to enrich the event with additional metadata or abort the execution by returning an error.
+	AfterEventCallback AfterEventCallback
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -65,6 +72,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if err != nil {
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
+
 	r, err := runner.New(e.config.RunnerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create a runner: %w", err)
@@ -79,7 +87,8 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 
 	invocationMeta := toInvocationMeta(ctx, e.config, reqCtx)
 
-	if err := e.prepareSession(ctx, invocationMeta); err != nil {
+	session, err := e.prepareSession(ctx, invocationMeta)
+	if err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
 		if err := queue.Write(ctx, event); err != nil {
 			return err
@@ -94,7 +103,8 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	}
 
 	processor := newEventProcessor(reqCtx, invocationMeta)
-	if err := e.process(ctx, r, processor, content, queue); err != nil {
+	executorContext := newExecutorContext(ctx, invocationMeta, session.State(), content)
+	if err := e.process(executorContext, r, processor, queue); err != nil {
 		return err
 	}
 
@@ -110,29 +120,34 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, qu
 }
 
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
-func (e *Executor) process(ctx context.Context, r *runner.Runner, processor *eventProcessor, content *genai.Content, q eventqueue.Queue) error {
+func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eventProcessor, q eventqueue.Queue) error {
 	meta := processor.meta
-	for event, err := range r.Run(ctx, meta.userID, meta.sessionID, content, e.config.RunConfig) {
-		if err != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", err), nil)
-			if eventSendErr := q.Write(ctx, event); eventSendErr != nil {
-				return fmt.Errorf("error event write failed: %w, %w", err, eventSendErr)
+	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
+		if adkErr != nil {
+			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", adkErr), nil)
+			if err := q.Write(ctx, event); err != nil {
+				return fmt.Errorf("error event write failed: %w, %w", err, adkErr)
 			}
 			return nil
 		}
 
-		a2aEvent, err := processor.process(ctx, event)
-		if err != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", err), event)
-			if eventSendErr := q.Write(ctx, event); eventSendErr != nil {
-				return fmt.Errorf("processor error event write failed: %w, %w", err, eventSendErr)
+		a2aEvent, pErr := processor.process(ctx, adkEvent)
+		if pErr == nil && a2aEvent != nil && e.config.AfterEventCallback != nil {
+			fmt.Println("callback")
+			pErr = e.config.AfterEventCallback(ctx, adkEvent, a2aEvent)
+		}
+
+		if pErr != nil {
+			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", pErr), adkEvent)
+			if err := q.Write(ctx, event); err != nil {
+				return fmt.Errorf("error event write failed: %w, %w", err, pErr)
 			}
 			return nil
 		}
 
 		if a2aEvent != nil {
 			if err := q.Write(ctx, a2aEvent); err != nil {
-				return fmt.Errorf("send event failed: %w", err)
+				return fmt.Errorf("event write failed: %w", err)
 			}
 		}
 	}
@@ -146,26 +161,26 @@ func (e *Executor) process(ctx context.Context, r *runner.Runner, processor *eve
 	return nil
 }
 
-func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) error {
+func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) (session.Session, error) {
 	service := e.config.RunnerConfig.SessionService
 
-	resp, err := service.Get(ctx, &session.GetRequest{
+	getResp, err := service.Get(ctx, &session.GetRequest{
 		AppName:   e.config.RunnerConfig.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 	})
-	if err == nil && resp != nil {
-		return nil
+	if err == nil {
+		return getResp.Session, nil
 	}
 
-	_, err = service.Create(ctx, &session.CreateRequest{
+	createResp, err := service.Create(ctx, &session.CreateRequest{
 		AppName:   e.config.RunnerConfig.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 		State:     make(map[string]any),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create a session: %w", err)
+		return nil, fmt.Errorf("failed to create a session: %w", err)
 	}
-	return nil
+	return createResp.Session, nil
 }

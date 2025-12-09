@@ -32,11 +32,12 @@ func ToA2AMetaKey(key string) string {
 type invocationMeta struct {
 	userID    string
 	sessionID string
+	agentName string
+	reqCtx    *a2asrv.RequestContext
 	eventMeta map[string]any
 }
 
 func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
-	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	// override userID if set in the call context
@@ -46,13 +47,19 @@ func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv
 		}
 	}
 
-	m := map[string]any{
+	meta := map[string]any{
 		ToA2AMetaKey("app_name"):   config.RunnerConfig.AppName,
 		ToA2AMetaKey("user_id"):    userID,
 		ToA2AMetaKey("session_id"): sessionID,
 	}
 
-	return invocationMeta{userID: userID, sessionID: sessionID, eventMeta: m}
+	return invocationMeta{
+		userID:    userID,
+		sessionID: sessionID,
+		agentName: config.RunnerConfig.Agent.Name(),
+		eventMeta: meta,
+		reqCtx:    reqCtx,
+	}
 }
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
