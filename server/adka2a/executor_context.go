@@ -16,6 +16,7 @@ package adka2a
 
 import (
 	"context"
+	"iter"
 
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"google.golang.org/genai"
@@ -81,4 +82,14 @@ func (ec *executorContext) RequestContext() *a2asrv.RequestContext {
 
 func (ec *executorContext) UserContent() *genai.Content {
 	return ec.userContent
+}
+
+type emptySessionState struct{}
+
+func (emptySessionState) Get(string) (any, error) {
+	return nil, session.ErrStateKeyNotExist
+}
+
+func (emptySessionState) All() iter.Seq2[string, any] {
+	return func(yield func(string, any) bool) {}
 }

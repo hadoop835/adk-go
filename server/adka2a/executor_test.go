@@ -316,16 +316,73 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	}
 }
 
-func TestExecutor_AfterEventCallback(t *testing.T) {
+func TestExecutor_Callbacks(t *testing.T) {
+	type contextKeyType struct{}
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
 	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
 
 	testCases := []struct {
-		name       string
-		events     []*session.Event
-		afterEvent AfterEventCallback
-		wantEvents []a2a.Event
+		name               string
+		createSessionFails bool
+		events             []*session.Event
+		beforeExecution    BeforeExecuteCallback
+		afterEvent         AfterEventCallback
+		afterExecution     AfterExecuteCallback
+		wantEvents         []a2a.Event
+		wantErr            error
 	}{
+		{
+			name: "abort execution",
+			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+				return nil, fmt.Errorf("aborted")
+			},
+			wantErr: fmt.Errorf("aborted"),
+		},
+		{
+			name: "instrument context",
+			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+				return context.WithValue(ctx, contextKeyType{}, "bar"), nil
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				text, _ := ctx.Value(contextKeyType{}).(string)
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: text})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})),
+			},
+		},
+		{
+			name: "intercept processing failure",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello, world!"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				return fmt.Errorf("fail!")
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})),
+			},
+		},
+		{
+			name:               "intercept session setup failure",
+			createSessionFails: true,
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				eventCount := 0
+				for range ctx.ReadonlyState().All() {
+					eventCount++
+				}
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: fmt.Sprintf("%d events", eventCount)})
+				return nil
+			},
+			wantEvents: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "0 events"}))},
+		},
 		{
 			name: "enrich event",
 			events: []*session.Event{
@@ -374,18 +431,23 @@ func TestExecutor_AfterEventCallback(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newEventReplayAgent() error = %v, want nil", err)
 			}
-			sessionService := session.InMemoryService()
+			sessionService := &testSessionService{Service: session.InMemoryService(), createErr: tc.createSessionFails}
 			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 			executor := NewExecutor(ExecutorConfig{
-				RunnerConfig:       runnerConfig,
-				AfterEventCallback: tc.afterEvent,
+				RunnerConfig:          runnerConfig,
+				BeforeExecuteCallback: tc.beforeExecution,
+				AfterEventCallback:    tc.afterEvent,
+				AfterExecuteCallback:  tc.afterExecution,
 			})
 			queue := &testQueue{Queue: newInMemoryQueue(t)}
 			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
 
 			err = executor.Execute(t.Context(), reqCtx, queue)
-			if err != nil {
+			if err != nil && tc.wantErr == nil {
 				t.Fatalf("executor.Execute() error = %v, want nil", err)
+			}
+			if err == nil && tc.wantErr != nil {
+				t.Fatalf("executor.Execute() error = nil, want %v", tc.wantErr)
 			}
 			if tc.wantEvents != nil {
 				if diff := cmp.Diff(tc.wantEvents, queue.events, ignoreFields...); diff != "" {

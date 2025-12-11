@@ -27,8 +27,14 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// BeforeExecuteCallback is the callback which will be called before an execution is started.
+type BeforeExecuteCallback func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error)
+
 // AfterEventCallback is the callback which will be called after an ADK event is converted to an A2A event.
 type AfterEventCallback func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error
+
+// AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
+type AfterExecuteCallback func(ctx ExecutorContext, finalEvent *a2a.TaskStatusUpdateEvent, err error) error
 
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
@@ -38,9 +44,19 @@ type ExecutorConfig struct {
 	// RunConfig is the configuration which will be passed to [runner.Runner.Run] during A2A Execute invocation.
 	RunConfig agent.RunConfig
 
+	// BeforeExecuteCallback is the callback which will be called before an execution is started.
+	// It can be used to instrument a context or prevent the execution by returning an error.
+	BeforeExecuteCallback BeforeExecuteCallback
+
 	// AfterEventCallback is the callback which will be called after an ADK event is successfully converted to an A2A event.
 	// This gives an opportunity to enrich the event with additional metadata or abort the execution by returning an error.
+	// The callback is not invoked for errors originating from ADK or event processing. Such errors are converted to
+	// TaskStatusUpdateEvent-s with TaskStateFailed state. If needed these can be intercepted using AfterExecuteCallback.
 	AfterEventCallback AfterEventCallback
+
+	// AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
+	// This gives an opportunity to enrich the event with additional metadata or log it.
+	AfterExecuteCallback AfterExecuteCallback
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -72,16 +88,21 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if err != nil {
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
-
 	r, err := runner.New(e.config.RunnerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create a runner: %w", err)
+	}
+	if e.config.BeforeExecuteCallback != nil {
+		ctx, err = e.config.BeforeExecuteCallback(ctx, reqCtx)
+		if err != nil {
+			return fmt.Errorf("before execute: %w", err)
+		}
 	}
 
 	if reqCtx.StoredTask == nil {
 		event := a2a.NewSubmittedTask(reqCtx, msg)
 		if err := queue.Write(ctx, event); err != nil {
-			return fmt.Errorf("failed to setup a task: %w", err)
+			return fmt.Errorf("failed to submit a task: %w", err)
 		}
 	}
 
@@ -90,10 +111,8 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	session, err := e.prepareSession(ctx, invocationMeta)
 	if err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
-		if err := queue.Write(ctx, event); err != nil {
-			return err
-		}
-		return nil
+		execCtx := newExecutorContext(ctx, invocationMeta, emptySessionState{}, content)
+		return e.writeFinalTaskStatus(execCtx, queue, event, err)
 	}
 
 	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateWorking, nil)
@@ -104,19 +123,12 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 
 	processor := newEventProcessor(reqCtx, invocationMeta)
 	executorContext := newExecutorContext(ctx, invocationMeta, session.State(), content)
-	if err := e.process(executorContext, r, processor, queue); err != nil {
-		return err
-	}
-
-	return nil
+	return e.process(executorContext, r, processor, queue)
 }
 
 func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
-	if err := queue.Write(ctx, event); err != nil {
-		return err
-	}
-	return nil
+	return queue.Write(ctx, event)
 }
 
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
@@ -125,10 +137,7 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
 		if adkErr != nil {
 			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", adkErr), nil)
-			if err := q.Write(ctx, event); err != nil {
-				return fmt.Errorf("agent run failure event write failed: %w, %w", err, adkErr)
-			}
-			return nil
+			return e.writeFinalTaskStatus(ctx, q, event, adkErr)
 		}
 
 		a2aEvent, pErr := processor.process(ctx, adkEvent)
@@ -138,10 +147,7 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 
 		if pErr != nil {
 			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", pErr), adkEvent)
-			if err := q.Write(ctx, event); err != nil {
-				return fmt.Errorf("processor failure event write failed: %w, %w", err, pErr)
-			}
-			return nil
+			return e.writeFinalTaskStatus(ctx, q, event, pErr)
 		}
 
 		if a2aEvent != nil {
@@ -151,12 +157,25 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 		}
 	}
 
-	for _, ev := range processor.makeTerminalEvents() {
-		if err := q.Write(ctx, ev); err != nil {
-			return fmt.Errorf("terminal event send failed: %w", err)
+	if finalChunk, ok := processor.makeFinalArtifactUpdate(); ok {
+		if err := q.Write(ctx, finalChunk); err != nil {
+			return fmt.Errorf("final artifact update write failed: %w", err)
 		}
 	}
 
+	finalStatus := processor.makeFinalStatusUpdate()
+	return e.writeFinalTaskStatus(ctx, q, finalStatus, nil)
+}
+
+func (e *Executor) writeFinalTaskStatus(ctx ExecutorContext, queue eventqueue.Queue, status *a2a.TaskStatusUpdateEvent, err error) error {
+	if e.config.AfterExecuteCallback != nil {
+		if err = e.config.AfterExecuteCallback(ctx, status, err); err != nil {
+			return fmt.Errorf("after execute: %w", err)
+		}
+	}
+	if err := queue.Write(ctx, status); err != nil {
+		return fmt.Errorf("%q state update event write failed: %w", status.Status.State, err)
+	}
 	return nil
 }
 
