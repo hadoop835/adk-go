@@ -160,7 +160,7 @@ func (p *a2aAgentRunProcessor) updateCustomMetadata(event *session.Event, respon
 		if v == nil {
 			continue
 		}
-		payload, err := converters.ToMapStructure(p.request)
+		payload, err := converters.ToMapStructure(v)
 		if err == nil {
 			event.CustomMetadata[adka2a.ToADKMetaKey(k)] = payload
 		} else {

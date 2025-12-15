@@ -252,12 +252,11 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 		return nil, fmt.Errorf("failed to read agent card from %q: %w", cfg.AgentCardSource, err)
 	}
 
-	var card *a2a.AgentCard
-	if err := json.Unmarshal(fileBytes, card); err != nil {
+	var card a2a.AgentCard
+	if err := json.Unmarshal(fileBytes, &card); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
 	}
-
-	return card, nil
+	return &card, nil
 }
 
 func destroy(client *a2aclient.Client) {
